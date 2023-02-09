@@ -1,10 +1,9 @@
-def create_import_csv(model_name, dataset_name, triples, folder_to_dataset, folder_to_import):
+def create_import_csv(model_name, dataset_name, mispredicted_triples, folder_to_dataset, folder_to_import):
     """
     Creates the import CSV taking in the triples that have been materialized and appends to existing dataset CSV
     :param model_name: Name of the embedding model
     :param dataset_name: Name of the dataset
-    :param triples: List of lists containing 4 values [s,p,o,t] where s is the subject, p is predicate, o is object
-                    and t is the r_type, 1 for ~M and 2 for M
+    :param mispredicted_triples: Dictionary indicating which triples are mispredicted
     :param folder_to_dataset: Path to folder that contains the CSV files for the dataset
     :param folder_to_import: Path to folder that contains CSV files for final database import
     :return:
@@ -36,13 +35,16 @@ def create_import_csv(model_name, dataset_name, triples, folder_to_dataset, fold
         Relationship file has the headers :START_ID,r_type,:END_ID,:TYPE
     '''
 
-    for triple in triples:
-        subject = triple[0]
-        predicate = triple[1]
-        object = triple[2]
-        r_type = triple[3]
+    for triple_key in mispredicted_triples:
 
-        file_model_relationships.write(f"{subject},{r_type},{object},{predicate}\n")
+        r_type = mispredicted_triples[triple_key]
+        s = triple_key[0]
+        p = triple_key[1]
+        o = triple_key[2]
+        if r_type:
+            file_model_relationships.write(f"{s},0,{o},{p}\n")
+        else:
+            file_model_relationships.write(f"{s},1,{o},{p}\n")
 
     file_dataset_relationships.close()
     file_dataset_nodes.close()
@@ -75,10 +77,10 @@ def create_dataset_csv(dataset_name, folder_to_dataset) -> None:
         entity_id = int(splits[1])
         file_dataset_nodes.write(f"{entity_id},NODE\n")
 
-    file_dataset_relationships.write(f":START_ID,r_type,:END_ID,:TYPE\n")
+    file_dataset_relationships.write(f":START_ID,triple_type,:END_ID,:TYPE\n")
     for line in file_dataset_relationships_alltriples:
         line = line.strip().split("\t")
-        file_dataset_relationships.write(f"{line[0]},0,{line[2]},{line[1]}\n")
+        file_dataset_relationships.write(f"{line[0]},2,{line[2]},{line[1]}\n")
 
     file_dataset_nodes.close()
     file_dataset_relationships.close()
@@ -86,9 +88,71 @@ def create_dataset_csv(dataset_name, folder_to_dataset) -> None:
     file_dataset_relationships_alltriples.close()
 
 
+def get_mispredicted_flagged_triples(folder_to_dataset, model_name):
+    """
+    This function finds which of the entire set of materialized triples are mispredictions
+    :param folder_to_dataset: Folder to materializations dataset
+    :param model_name: Name of the model
+    :return:
+    """
+
+    materialized_triples_file_path = f"{folder_to_dataset}\\{model_name}_materialized.tsv"
+    mispredicted_triples_file_path = f"{folder_to_dataset}\\{model_name}_mispredicted.tsv"
+
+    mispredicted_triples = {}
+
+    materialized_file = open(materialized_triples_file_path, "r")
+    mispredicted_file = open(mispredicted_triples_file_path, "r")
+
+    materialized_ctr = 0
+    mispredicted_ctr = 0
+    for line in mispredicted_file:
+        if line == "\n":
+            continue
+        line = line.strip()
+        s, p, o = line.split("\t")
+        mispredicted_triples[(s, p, o)] = True
+        mispredicted_ctr += 1
+
+    for line in materialized_file:
+        if line == "\n":
+            continue
+        line = line.strip()
+        s, p, o = line.split("\t")
+        mispredicted_triples[(s, p, o)] = False
+        materialized_ctr += 1
+
+    print("Number of materialized triples: ", materialized_ctr)
+    print("Number of mispredicted triples: ", mispredicted_ctr)
+    materialized_file.close()
+    mispredicted_file.close()
+    return mispredicted_triples
+
+
+def reconcile_materialization_and_import(dataset_name, model_name):
+    """
+    This function computes the mispredicted triples and writes the files
+    :param dataset_name: Name of the dataset
+    :param model_name: Name of the model
+    :return:
+    """
+    folder_to_dataset = "D:\\PhD\\Work\\UnderstandingLP\\data\\Datasets"
+    folder_to_import = "D:\\PhD\\Work\\UnderstandingLP\\data\\Imports"
+    folder_to_materialization = "D:\\PhD\\Work\\EmbeddingInterpretibility\\Interpretibility\\Results\\Materializations"
+
+    mispredicted_flagged_triples = get_mispredicted_flagged_triples(
+        folder_to_dataset=f"{folder_to_materialization}\\{dataset_name}\\", model_name=model_name)
+
+    create_dataset_csv(dataset_name=dataset_name, folder_to_dataset=folder_to_dataset)
+    create_import_csv(model_name=model_name, dataset_name=dataset_name,
+                      mispredicted_triples=mispredicted_flagged_triples, folder_to_dataset=folder_to_dataset,
+                      folder_to_import=folder_to_import)
+
 if __name__ == "__main__":
-    dataset = "WN18"
-    create_dataset_csv(dataset_name=dataset, folder_to_dataset="D:\\PhD\\Work\\UnderstandingLP\\data\\Datasets")
-    model_name = "TransE"
-    triples = [[0,1,2,1], [1,1,2,2], [3,2,2,1], [0,1,3,2], [0,2,2,1]]
-    create_import_csv(model_name=model_name, dataset_name=dataset, folder_to_dataset="D:\\PhD\\Work\\UnderstandingLP\\data\\Datasets", folder_to_import="D:\\PhD\\Work\\UnderstandingLP\\data\\Imports", triples=triples)
+
+    dataset_name = "WN18RR"
+    model_name = "ComplEx"
+
+    print("Dataset name: ", dataset_name)
+    print("Model name: ", model_name)
+    reconcile_materialization_and_import(dataset_name=dataset_name, model_name=model_name)

@@ -1,0 +1,25 @@
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.google.guava:guava:31.1-jre'
+    implementation 'org.neo4j:neo4j:4.4.10'
+}
+
+application {
+    // Define the main class for the application.
+    mainClass = 'Graph_JAVA.RuleQuery'
+}
+
+java {
+    sourceCompatibility = '15'
+}
+
+tasks.withType(JavaExec) {
+    jvmArgs = ['-Djdk.home=C:\\Program Files\\Amazon Corretto\\jdk15.0.2_7\\bin\\java.exe']
+}

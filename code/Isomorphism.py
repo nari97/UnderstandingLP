@@ -1,11 +1,23 @@
-import math
-
 import networkx
-
-from ParseRules import ParseRule, Rule, Atom
+import subprocess
+from ExtractMetrics import extract_metrics
 from Score import Score
 
 universal_node_ids = None
+
+
+def get_bucket(rules):
+    global universal_node_ids
+
+    rules_base = rules
+
+    universal_node_ids = get_universal_node_id_mapping([rules_base])
+    base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules_base)
+    networkx_to_rule_mapping = {**base_nwx_mapping}
+
+    base_bucket_type = create_bucket_by_type(base_graphs)
+
+    return base_bucket_type, networkx_to_rule_mapping
 
 
 def get_universal_node_id_mapping(rules_list):
@@ -141,65 +153,30 @@ def node_match(node1, node2):
             return False
 
 
-def edge_match(edge1, edge2):
+def compute_selectivity(head_coverage, pca_confidence, beta=1.0):
     """
-        Function for matching two edges for isomorphism
+    Compute selectivity based on head coverage and PCA confidence.
 
-        Args:
-            node1: 1st edge
-            node2: 2nd edge
+    Parameters:
+    head_coverage (float): Head coverage value.
+    pca_confidence (float): PCA confidence value.
+    beta (float, optional): The beta value for selectivity calculation. Default is 1.0.
 
-        Returns:
-            boolean: If the two edges were a match or not
+    Returns:
+    float: Selectivity value.
+
     """
-    return edge1["r"] == edge2["r"]
+    selectivity = ((1 + beta * beta) * pca_confidence * head_coverage) / (
+            beta * beta * pca_confidence + head_coverage)
+    return selectivity
 
 
-def write_rule_matches(dataset_name, model_name, mat_type, folder_to_write, rule_matches, additional=""):
+def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, beta=1.0):
     """
-        Write all matching rules to a file
-
-        Args:
-            dataset_name: Name of the dataset
-            model_name: Name of the link prediction model
-            mat_type: Materialization type
-            folder_to_write: Path to folder for writing results
-            rule_matches: List of List, where inner List contains two elements. Index 0 is the base rule and Index 1 is the augmented rule
-            additional: Additional text for filename
-    """
-
-    rule_match_filename = f"{folder_to_write}{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}"
-
-    if additional != "":
-        rule_match_filename += f"_{additional}"
-
-    rule_match_filename += "_rule_matches.csv"
-
-    with open(rule_match_filename, "w+") as file_obj:
-        file_obj.write(
-            "Base rule,Base rule HC,Base rule PCA,Base rule Selec,Augmented rule,Augmented rule HC,Augmented Rule PCA,Augmented Rule Selec\n")
-
-        for rule_base, rule_augment in rule_matches:
-            string = ""
-            string += rule_base.id_print() + ","
-            string += str(rule_base.head_coverage) + ","
-            string += str(rule_base.pca_confidence) + ","
-            string += str(rule_base.selectivity) + ","
-            string += str(rule_augment.id_print()) + ","
-            string += str(rule_augment.head_coverage) + ","
-            string += str(rule_augment.pca_confidence) + ","
-            string += str(rule_augment.selectivity) + "\n"
-
-            file_obj.write(string)
-
-
-def aggregate_score(base_rule_bucket, augment_rule_bucket, networkx_to_rule_mapping):
-    """
-        Compute the aggregate difference between base_rule_bucket and augment_rule_bucket
+        Compute the aggregate difference between the metrics for the base rule and the metrics for the mispredictions
 
         Args:
             base_rule_bucket: Bucket containing rules from base graph
-            augment_rule_bucket: Bucket containing rules from augmented graph
             networkx_to_rule_mapping: Dict containing the mapping between networkx.DiGraph and Rule
 
         Returns:
@@ -213,108 +190,41 @@ def aggregate_score(base_rule_bucket, augment_rule_bucket, networkx_to_rule_mapp
     for key in base_rule_bucket:
         match_by_key[key] = False
 
-    augment_indexed_by_head = {}
-
-    for key in augment_rule_bucket:
-        for i in range(len(augment_rule_bucket[key])):
-            my_rule = networkx_to_rule_mapping[augment_rule_bucket[key][i]]
-            my_rule_head = my_rule.head_atom.relationship
-            if my_rule_head not in augment_indexed_by_head:
-                augment_indexed_by_head[my_rule_head] = []
-            augment_indexed_by_head[my_rule_head].append([key, i])
-
     for key in base_rule_bucket:
         score_by_key[key] = []
 
     for key in base_rule_bucket:
+        print("\nKey: ", key)
+        print("\n============================")
         for rule in base_rule_bucket[key]:
             my_rule = networkx_to_rule_mapping[rule]
-            my_rule_head = my_rule.head_atom.relationship
-            score = None
-            if my_rule_head not in augment_indexed_by_head:
-                score = Score(-my_rule.head_coverage, -my_rule.pca_confidence, -my_rule.selectivity)
-                score_by_key[key].append(score)
-            else:
-                rule_found_flag = False
-                for augment_key, augment_index in augment_indexed_by_head[my_rule_head]:
-                    augment_rule = augment_rule_bucket[augment_key][augment_index]
-                    if networkx.is_isomorphic(rule, augment_rule, node_match=node_match, edge_match=edge_match):
-                        augment_actual = networkx_to_rule_mapping[augment_rule]
-                        hc_base = my_rule.head_coverage
-                        hc_augment = augment_actual.head_coverage
-                        pca_base = my_rule.pca_confidence
-                        pca_augment = augment_actual.pca_confidence
-                        selec_base = my_rule.selectivity
-                        selec_augment = augment_actual.selectivity
-                        rule_matches.append([my_rule, augment_actual])
-                        hc_score = hc_augment - hc_base
-                        pca_score = pca_augment - pca_base
-                        selec_score = selec_augment - selec_base
+            print(my_rule.id_print())
+            hc_base = my_rule.head_coverage
+            hc_predictions = my_rule.new_head_coverage
+            pca_base = my_rule.pca_confidence
+            pca_predictions = my_rule.new_pca_confidence
+            selec_base = compute_selectivity(hc_base, pca_base, beta)
+            selec_predictions = compute_selectivity(hc_predictions, pca_predictions, beta)
+            hc_score = hc_predictions - hc_base
+            pca_score = pca_predictions - pca_base
+            selec_score = selec_predictions - selec_base
 
-                        score = Score(hc_score, pca_score, selec_score)
-                        rule_found_flag = True
-                        break
+            score = Score(hc_score, pca_score, selec_score)
 
-                if rule_found_flag:
-                    score_by_key[key].append(score)
-                    match_by_key[key] = True
-                else:
-                    score = Score(-my_rule.head_coverage, -my_rule.pca_confidence,
-                                  -my_rule.selectivity)
-                    score_by_key[key].append(score)
+            score_by_key[key].append(score)
 
     aggregator_dict = {}
 
     for key in base_rule_bucket:
         agg_score = Score(0.0, 0.0, 0.0)
 
-        if not match_by_key[key]:
-            aggregator_dict[key] = Score(-1.0, -1.0, -1.0)
-        else:
-            for score_object in score_by_key[key]:
-                agg_score.add(score_object.hc, score_object.pca, score_object.selec)
+        for score_object in score_by_key[key]:
+            agg_score.add(score_object.hc, score_object.pca, score_object.selec)
 
-            agg_score.divide(len(score_by_key[key]), len(score_by_key[key]), len(score_by_key[key]))
-            aggregator_dict[key] = agg_score
+        agg_score.divide(len(score_by_key[key]), len(score_by_key[key]), len(score_by_key[key]))
+        aggregator_dict[key] = agg_score
 
-    return aggregator_dict, rule_matches
-
-
-def create_bucket_by_head_in_body(bucket, networkx_to_rule_mapping):
-    """
-        Break bucket by whether predicate in head is also in body
-
-        Args:
-            bucket: Dict containing the rules by key
-            networkx_to_rule_mapping: Dict containing the mapping between networkx.DiGraph and Rule
-
-        Returns:
-            head_in_body: Dict containing rules where head is in body (keyed by type)
-            head_not_in_body: Dict containing rules where head is not in body (keyed by type)
-    """
-
-    head_in_body = {}
-    head_not_in_body = {}
-
-    for key in bucket:
-        for rule in bucket[key]:
-            my_rule = networkx_to_rule_mapping[rule]
-            my_rule_head = my_rule.head_atom.relationship
-            head_found_flag = False
-            for body_atom in my_rule.body_atoms:
-                if body_atom.relationship == my_rule_head:
-                    head_found_flag = True
-
-            if head_found_flag:
-                if key not in head_in_body:
-                    head_in_body[key] = []
-                head_in_body[key].append(rule)
-            else:
-                if key not in head_not_in_body:
-                    head_not_in_body[key] = []
-                head_not_in_body[key].append(rule)
-
-    return head_in_body, head_not_in_body
+    return aggregator_dict
 
 
 def create_bucket_by_head(bucket, networkx_to_rule_mapping):
@@ -344,31 +254,24 @@ def create_bucket_by_head(bucket, networkx_to_rule_mapping):
     return head_buckets
 
 
-def write_aggregated_score(dataset_name, model_name, mat_type, folder_to_write, agg_score, bucket,
-                           networkx_to_rule_mapping, relations=None, additional=""):
+def write_aggregated_score(folder_to_write, agg_score, bucket, networkx_to_rule_mapping, results_file_name,
+                           relations=None):
     """
-        Write aggregated scores to a file
+    Write the aggregated scores of a given set of relations to a file.
 
-        Args:
-            dataset_name: Name of the dataset
-            model_name: Name of the link prediction model
-            mat_type: Materialization type
-            folder_to_write: Path to folder for writing results
-            agg_score: Dict containing aggregated scores for each key
-            networkx_to_rule_mapping: Dict containing the mapping between networkx.DiGraph and Rule
-            bucket: Bucket that scores have been aggregated on
-            relations: List of relations in dataset
-            additional: Additional text for filename
+    Args:
+    - folder_to_write (str): The path of the folder where the results file will be written.
+    - agg_score (dict): A dictionary mapping relation type to aggregated scores.
+    - bucket (dict): A dictionary mapping relation type to a tuple of networkx node and rule id.
+    - networkx_to_rule_mapping (dict): A dictionary mapping networkx node to the corresponding rule object.
+    - results_file_name (str): The name of the results file to be written.
+    - relations (List[str], optional): A list of relation types to be written. Defaults to None.
     """
-    filename = f"{folder_to_write}{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}"
 
-    if additional != "":
-        filename += f"_{additional}"
-
-    filename += ".csv"
+    results_file_name = f"{folder_to_write}\\{results_file_name}"
     keys = bucket.keys() if relations is None else relations
 
-    with open(filename, "w+") as file_obj:
+    with open(results_file_name, "w+") as file_obj:
         file_obj.write("Type,Rule,HC,PCA,Selec\n")
         for key in keys:
 
@@ -380,137 +283,78 @@ def write_aggregated_score(dataset_name, model_name, mat_type, folder_to_write, 
             file_obj.write(f"{key},{rule.id_print()},{hc},{pca},{selec}\n")
 
 
-def get_bucket(model_name, dataset_name, mat_type, relations):
+def compile_results_single(model_name, dataset_name, results_file_name, processed_file_name,
+                           folder_to_write, folder_to_processed_rules, beta=1.0, relations=None):
+    """
+    Compile and aggregate the results for a single model-dataset combination.
+
+    Args:
+    - model_name (str): The name of the model.
+    - dataset_name (str): The name of the dataset.
+    - results_file_name (str): The name of the results file to be written.
+    - processed_file_name (str): The name of the processed rules file.
+    - folder_to_write (str): The path of the folder where the results file will be written.
+    - folder_to_processed_rules (str): The path of the folder where the processed rules are stored.
+    - beta (float, optional): A weight parameter used in score aggregation. Defaults to 1.0.
+    - relations (int, optional): The number of relation types to be written. Defaults to None.
+    """
+
     global universal_node_ids
 
-    folder_to_rules = "D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Experiments\Rules\\"
-    rules1 = ParseRule(
-        filename=f"{folder_to_rules}{mat_type}\\{dataset_name}\\{model_name}\\{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}_base_rules.tsv",
-        model_name=model_name, dataset_name=dataset_name)
-    rules2 = ParseRule(
-        filename=f"{folder_to_rules}{mat_type}\\{dataset_name}\\{model_name}\\{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}_augment_rules.tsv",
-        model_name=model_name, dataset_name=dataset_name)
+    processed_rules_path = f"{folder_to_processed_rules}{dataset_name}\\{processed_file_name}"
 
-    rules1.parse_rules_from_file()
-    rules2.parse_rules_from_file()
+    rules = extract_metrics(processed_rules_path)
 
-    rules_base = rules1.rules
-    rules_augment = rules2.rules
-
-    universal_node_ids = get_universal_node_id_mapping([rules_base, rules_augment])
-    base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules_base)
-    augment_graphs, augment_nwx_mapping = convert_rules_to_networkx_graphs(rules_augment)
-    networkx_to_rule_mapping = {**base_nwx_mapping, **augment_nwx_mapping}
+    universal_node_ids = get_universal_node_id_mapping([rules])
+    base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules)
+    networkx_to_rule_mapping = {**base_nwx_mapping}
 
     base_bucket_type = create_bucket_by_type(base_graphs)
-    augment_bucket_type = create_bucket_by_type(augment_graphs)
 
-    return base_bucket_type, augment_bucket_type, networkx_to_rule_mapping
+    agg_score_by_type= aggregate_score(base_rule_bucket=base_bucket_type,
+                                                            networkx_to_rule_mapping=networkx_to_rule_mapping,
+                                                            beta=beta)
+    write_aggregated_score(folder_to_write=folder_to_write, agg_score=agg_score_by_type, bucket=base_bucket_type,
+                           networkx_to_rule_mapping=networkx_to_rule_mapping, results_file_name=results_file_name)
 
-
-def results_by_type(model_name, dataset_name, mat_type, relations, base_bucket, augment_bucket,
-                    networkx_to_rule_mapping, additional="type"):
-    folder_to_write = f"D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Experiments\Results\\{mat_type}\\{dataset_name}\\{model_name}\\"
-    agg_score_by_type, rule_match_by_type = aggregate_score(base_rule_bucket=base_bucket,
-                                                            augment_rule_bucket=augment_bucket,
-                                                            networkx_to_rule_mapping=networkx_to_rule_mapping)
-    write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                           folder_to_write=folder_to_write, agg_score=agg_score_by_type, bucket=base_bucket,
-                           networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional)
-    write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                       folder_to_write=folder_to_write, rule_matches=rule_match_by_type, additional=additional)
-
-
-def results_by_head(model_name, dataset_name, mat_type, relations, base_bucket, augment_bucket,
-                    networkx_to_rule_mapping, additional="head"):
-    folder_to_write = f"D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Experiments\Results\\{mat_type}\\{dataset_name}\\{model_name}\\"
-    base_bucket_head = create_bucket_by_head(bucket=base_bucket, networkx_to_rule_mapping=networkx_to_rule_mapping)
-    augment_bucket_head = create_bucket_by_head(bucket=augment_bucket,
-                                                networkx_to_rule_mapping=networkx_to_rule_mapping)
-    agg_score_by_head, rule_match_by_head = aggregate_score(base_rule_bucket=base_bucket_head,
-                                                            augment_rule_bucket=augment_bucket_head,
-                                                            networkx_to_rule_mapping=networkx_to_rule_mapping)
-    write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                           folder_to_write=folder_to_write, agg_score=agg_score_by_head, bucket=base_bucket_head,
-                           networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional,
-                           relations=relations)
-    write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                       folder_to_write=folder_to_write, rule_matches=rule_match_by_head, additional=additional)
+    # base_bucket_head = create_bucket_by_head(bucket=base_bucket_type, networkx_to_rule_mapping=networkx_to_rule_mapping)
+    # augment_bucket_head = create_bucket_by_head(bucket=augment_bucket_type,
+    #                                             networkx_to_rule_mapping=networkx_to_rule_mapping)
+    # agg_score_by_head, rule_match_by_head = aggregate_score(base_rule_bucket=base_bucket_head,
+    #                                                         augment_rule_bucket=augment_bucket_head,
+    #                                                         networkx_to_rule_mapping=networkx_to_rule_mapping)
+    # write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
+    #                        folder_to_write=folder_to_write, agg_score=agg_score_by_head, bucket=base_bucket_head,
+    #                        networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional,
+    #                        relations=relations)
+    # write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
+    #                    folder_to_write=folder_to_write, rule_matches=rule_match_by_head, additional=additional)
 
 
-def get_results(model_name, dataset_name, mat_type, relations, additional=""):
-    global universal_node_ids
-    folder_to_write = f"D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Experiments\Results\\{mat_type}\\{dataset_name}\\{model_name}\\"
-    folder_to_rules = "D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Experiments\Rules\\"
-    rules1 = ParseRule(
-        filename=f"{folder_to_rules}{mat_type}\\{dataset_name}\\{model_name}\\{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}_base_rules.tsv",
-        model_name=model_name, dataset_name=dataset_name)
-    rules2 = ParseRule(
-        filename=f"{folder_to_rules}{mat_type}\\{dataset_name}\\{model_name}\\{dataset_name.lower()}_{model_name.lower()}_{mat_type.lower()}_augment_rules.tsv",
-        model_name=model_name, dataset_name=dataset_name)
+def process_rules(model_name, dataset_name, mat_file_name, rules_file_name, processed_rule_folder_path):
+    java_class_path = r"D:\PhD\Work\UnderstandingLP\Graph_JAVA\Graph_JAVA\build\install\Graph_JAVA\bin\Graph_JAVA.bat"
 
-    rules1.parse_rules_from_file()
-    rules2.parse_rules_from_file()
+    print("Starting post processing of rules")
+    process = subprocess.Popen([java_class_path, dataset_name, model_name, mat_file_name, rules_file_name, "1.0"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    print("the commandline is {}".format(process.args))
+    print(stdout.decode())
+    print(stderr.decode())
+    print("Finished processing of rules")
 
-    rules_base = rules1.rules
-    rules_augment = rules2.rules
+    processed_rule_file_name = f"{processed_rule_folder_path}\\{dataset_name}\\{mat_file_name}"
+    rules = extract_metrics(processed_rule_file_name)
 
-    universal_node_ids = get_universal_node_id_mapping([rules_base, rules_augment])
-    base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules_base)
-    augment_graphs, augment_nwx_mapping = convert_rules_to_networkx_graphs(rules_augment)
-    networkx_to_rule_mapping = {**base_nwx_mapping, **augment_nwx_mapping}
-
-    base_bucket_type = create_bucket_by_type(base_graphs)
-    augment_bucket_type = create_bucket_by_type(augment_graphs)
-    agg_score_by_type, rule_match_by_type = aggregate_score(base_rule_bucket=base_bucket_type,
-                                                            augment_rule_bucket=augment_bucket_type,
-                                                            networkx_to_rule_mapping=networkx_to_rule_mapping)
-    write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                           folder_to_write=folder_to_write, agg_score=agg_score_by_type, bucket=base_bucket_type,
-                           networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional)
-    write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                       folder_to_write=folder_to_write, rule_matches=rule_match_by_type, additional=additional)
-
-    base_bucket_head = create_bucket_by_head(bucket=base_bucket_type, networkx_to_rule_mapping=networkx_to_rule_mapping)
-    augment_bucket_head = create_bucket_by_head(bucket=augment_bucket_type,
-                                                networkx_to_rule_mapping=networkx_to_rule_mapping)
-    agg_score_by_head, rule_match_by_head = aggregate_score(base_rule_bucket=base_bucket_head,
-                                                            augment_rule_bucket=augment_bucket_head,
-                                                            networkx_to_rule_mapping=networkx_to_rule_mapping)
-    write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                           folder_to_write=folder_to_write, agg_score=agg_score_by_head, bucket=base_bucket_head,
-                           networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional,
-                           relations=relations)
-    write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-                       folder_to_write=folder_to_write, rule_matches=rule_match_by_head, additional=additional)
-
-
-def t():
-    dataset_name = "WN18"
-    mat_type = "Materialized"
-    n_relations = 18
-    relations = [i for i in range(n_relations)]
-
-    model_name = "ComplEx"
-    base_bucket, augment_bucket, networkx_to_rule_mapping = get_bucket(model_name=model_name, dataset_name=dataset_name,
-                                                                       mat_type=mat_type, relations=relations)
-    results_by_type(model_name=model_name, dataset_name=dataset_name, mat_type=mat_type, relations=relations,
-                    base_bucket=base_bucket, augment_bucket=augment_bucket,
-                    networkx_to_rule_mapping=networkx_to_rule_mapping)
-    results_by_head(model_name=model_name, dataset_name=dataset_name, mat_type=mat_type, relations=relations,
-                    base_bucket=base_bucket, augment_bucket=augment_bucket,
-                    networkx_to_rule_mapping=networkx_to_rule_mapping)
-
-    model_name = "TransE"
-    base_bucket, augment_bucket, networkx_to_rule_mapping = get_bucket(model_name=model_name, dataset_name=dataset_name,
-                                                                       mat_type=mat_type, relations=relations)
-    results_by_type(model_name=model_name, dataset_name=dataset_name, mat_type=mat_type, relations=relations,
-                    base_bucket=base_bucket, augment_bucket=augment_bucket,
-                    networkx_to_rule_mapping=networkx_to_rule_mapping)
-    results_by_head(model_name=model_name, dataset_name=dataset_name, mat_type=mat_type, relations=relations,
-                    base_bucket=base_bucket, augment_bucket=augment_bucket,
-                    networkx_to_rule_mapping=networkx_to_rule_mapping)
+    return rules
 
 
 if __name__ == "__main__":
-    t()
+    model_name = "TransE"
+    dataset_name = "WN18"
+    results_file_name = "WN18_TransE_type_aggregated.tsv"
+    processed_file_name = "TransE_materialized.tsv"
+    folder_to_write = f"D:\\PhD\\Work\\UnderstandingLP\\data\\Results\\{dataset_name}\\{model_name}"
+    folder_to_processed_rules = f"D:\\PhD\\Work\\UnderstandingLP\\data\\ProcessedRules\\"
+    compile_results_single(model_name, dataset_name, results_file_name, processed_file_name, folder_to_write,
+                           folder_to_processed_rules)

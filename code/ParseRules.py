@@ -19,8 +19,6 @@ class Atom:
     def __hash__(self):
         return hash(self.id_print())
 
-
-
     def __eq__(self, other):
         if self.id_print() == other.id_print():
             return True
@@ -113,24 +111,26 @@ class Rule:
             if v1 not in variables:
                 variables.append(v1.replace("?", ""))
             if v2 not in variables:
-                variables.append(v2.replace("?",""))
+                variables.append(v2.replace("?", ""))
 
         return variables
 
 
 class ParseRule:
 
-    def __init__(self, filename, model_name, dataset_name, relation_delimiter="\t"):
+    def __init__(self, filename, model_name, dataset_name, dataset_folder, relation_delimiter="\t"):
         self.filename = filename
         self.model_name = model_name
         self.dataset_name = dataset_name
         self.rules_by_predicate = {}
         self.rules = []
         self.id_to_relationship = {}
+        self.dataset_folder = dataset_folder
         self.create_id_to_relationship(relation_delimiter)
 
     def create_id_to_relationship(self, relation_delimiter):
-        f_ids = open("D:\PhD\Work\EmbeddingInterpretibility\RulePatterns\data\Datasets\\" + self.dataset_name + "/relation2id.txt")
+        f_ids = open(
+            self.dataset_folder + self.dataset_name + "/relation2id.txt")
         f_ids.readline()
 
         for line in f_ids:

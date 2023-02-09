@@ -39,6 +39,21 @@ def create_neo4j_database(model_name, dataset_name, path_to_imports="D:\\PhD\\Wo
     with driver.session(database="system") as session:
         session.execute_write(create_db, database_name)
 
+    with driver.session(database=database_name) as session:
+        result = session.run("""MATCH (s)-[r]->(o)
+                                WITH r.triple_type as triple_type, count(*) as countOfTriples
+                                RETURN triple_type, countOfTriples""")
+
+        for record in result:
+            r_type = record["triple_type"]
+            count = record["countOfTriples"]
+
+            if r_type == "0":
+                print("Number mispredicted: ", count)
+            elif r_type == "1":
+                print("Number excluding mispredictions: ", count)
+            else:
+                print("Number kg truth: ", count)
     driver.close()
 
 
@@ -47,6 +62,6 @@ def create_db(tx, db_name):
 
 
 if __name__ == "__main__":
-    dataset = "WN18"
+    dataset = "WN18RR"
     model = "TransE"
     create_neo4j_database(model_name=model, dataset_name=dataset)

@@ -1,0 +1,2 @@
+rootProject.name = 'Graph_JAVA'
+include('app')

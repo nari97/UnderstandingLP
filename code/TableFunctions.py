@@ -1,10 +1,10 @@
 import networkx
 
-from Isomorphism import convert_rules_to_networkx_graphs, get_networkx_representation, node_match, edge_match, \
+from Isomorphism_old import convert_rules_to_networkx_graphs, get_networkx_representation, node_match, edge_match, \
     get_universal_node_id_mapping, \
     create_bucket_by_type
 from ParseRules import Atom, Rule
-import Isomorphism
+import Isomorphism_old
 
 global universal_node_id_mapping
 
@@ -124,7 +124,7 @@ def match_type_files(files, folder_to_write, dataset_name, additional=""):
 
     # Get universal node id mapping
     universal_node_id_mapping = get_universal_node_id_mapping([all_rules])
-    Isomorphism.universal_node_ids = universal_node_id_mapping
+    Isomorphism_old.universal_node_ids = universal_node_id_mapping
     nwx_mapping = {}
     nwx_graph_by_file_name = {}
     nwx_rules = []
