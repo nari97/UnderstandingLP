@@ -24,7 +24,7 @@ public class RuleQuery {
          @throws IOException if an I/O error occurs while accessing the database folder
          */
 
-        File neo4j_folder = new File(database_folder_path + "\\db\\");
+        File neo4j_folder = new File(database_folder_path + "/db/");
         if (neo4j_folder.exists())
             MoreFiles.deleteRecursively(neo4j_folder.toPath(), RecursiveDeleteOption.ALLOW_INSECURE);
         BatchInserter inserter = BatchInserters.inserter(DatabaseLayout.of(
@@ -54,10 +54,14 @@ public class RuleQuery {
          @param database_folder_path The path to the folder containing the Neo4j database.
          @return An ArrayList of two Double values, representing the HC and PCA respectively.
          */
-        File neo4j_folder = new File(database_folder_path + "\\db\\");
+        File neo4j_folder = new File(database_folder_path + "/db/");
         DatabaseManagementService service = new DatabaseManagementServiceBuilder(neo4j_folder.toPath()).
                 setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
+                setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).
+                setConfig(GraphDatabaseSettings.pagecache_memory, "64G").
+                setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
                 setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).build();
+
         GraphDatabaseService db = service.database("neo4j");
         String nonFuncVar = rule_to_query.functional_variable.equals("a")?"b":"a";
 
@@ -150,19 +154,21 @@ public class RuleQuery {
         return metrics;
     }
 
-    public static HashMap<Integer, ArrayList> collect_materializations(String materialization_folder_path) throws FileNotFoundException {
+    public static HashMap<Integer, ArrayList> collect_materializations(String materialization_folder_path, String train_triples_path) throws FileNotFoundException {
 
         ArrayList<ArrayList<Integer>> triples = new ArrayList<>();
 
         HashMap<Integer, ArrayList> triple_dict = new HashMap<>();
         Scanner sc = new Scanner(new File(materialization_folder_path));
-
+        int materialization_count = 0;
+        int train_count = 0;
         while(sc.hasNext()){
 
             String line = sc.nextLine();
             if (line.equals("\n") || line.equals(""))
                 continue;
             String[] splits = line.strip().split("\t");
+            materialization_count++;
             int s = Integer.parseInt(splits[0]);
             int p =Integer.parseInt(splits[1]);
             int o = Integer.parseInt(splits[2]);
@@ -179,6 +185,37 @@ public class RuleQuery {
             triple_dict.get(p).add(triple);
         }
 
+        sc.close();
+
+        sc = new Scanner(new File(train_triples_path));
+        sc.nextLine();
+        while(sc.hasNext()){
+
+            String line = sc.nextLine();
+            if (line.equals("\n") || line.equals(""))
+                continue;
+            train_count++;
+            String[] splits = line.strip().split("\t");
+            if (splits.length == 1){
+                splits = line.strip().split(" ");
+            }
+            int s = Integer.parseInt(splits[0]);
+            int o =Integer.parseInt(splits[1]);
+            int p = Integer.parseInt(splits[2]);
+
+            if (!triple_dict.containsKey(p)){
+                ArrayList<ArrayList<Integer>> temp= new ArrayList();
+                triple_dict.put(p, temp);
+            }
+
+            ArrayList<Integer> triple = new ArrayList<>();
+            triple.add(s);
+            triple.add(p);
+            triple.add(o);
+            triple_dict.get(p).add(triple);
+        }
+
+        System.out.println("Materialization count: " + materialization_count + ", Train count: " + train_count);
         return triple_dict;
     }
 
@@ -199,51 +236,7 @@ public class RuleQuery {
         return new ArrayList(triples);
     }
 
-    public static boolean compareDouble(double a, double b, int decimalPlace) {
-        double epsilon = Math.pow(10, -decimalPlace);
-//        System.out.println(a + " " + b + " ");
-        return Math.abs(a - b) < epsilon;
-    }
 
-    public static void t_query_rule() throws IOException {
-        String []datasets = new String[]{"FB15K", "FB15K-237"};
-        String []models = new String[]{"ComplEx", "ConvE", "TransE", "TuckER"};
-
-        String materialization_folder = "D:\\PhD\\Work\\EmbeddingInterpretibility\\Interpretibility\\Results\\Materializations";
-        String database_folder = "D:\\PhD\\Work\\UnderstandingLP\\Graph_JAVA\\Graph_JAVA\\db";
-        String rules_folder = "D:\\PhD\\Work\\EmbeddingInterpretibility\\Interpretibility\\Results\\MinedRules\\";
-        String dataset_folder = "D:\\PhD\\Work\\EmbeddingInterpretibility\\Interpretibility\\Datasets\\";
-
-        for(String dataset: datasets){
-            for(String model: models){
-                System.out.println("Dataset: " + dataset + " Model: " + model);
-                String rule_filename = rules_folder + dataset + "\\" + model + "_materialized"+".tsv";
-                RuleParser rp = new RuleParser(rule_filename, dataset_folder, model, dataset, "\t");
-                rp.parse_rules_from_file(1.0);
-                int[] random_numbers = IntStream.range(0, 25).map(i -> (int) (Math.random() * rp.rules.size())).toArray();
-                HashMap<Integer, ArrayList> triple_dict = collect_materializations(materialization_folder + "\\" + dataset + "\\" + model + "_materialized.tsv" );
-                for(int i = 0; i<random_numbers.length; ++i){
-                    int rno = random_numbers[i];
-                    Rule rule = rp.rules.get(rno);
-                    System.out.println("\nRule " + i + ": " + rule.id_print());
-                    System.out.println("============================================");
-                    double rule_hc = rule.head_coverage;
-                    double rule_pca = rule.pca_confidence;
-
-                    ArrayList<ArrayList<Integer>> triples = collect_materializations_for_rule(rule, triple_dict);
-                    create_neo4j_database(database_folder, triples);
-                    ArrayList<Double> metrics = query_rule(rule, database_folder);
-                    System.out.println("HC: " + rule_hc + " PCA: " + rule_pca + " mHC: " + metrics.get(0) + " mPCA: " + metrics.get(1));
-                    if (!compareDouble(rule_hc, metrics.get(0), 4) || !compareDouble(rule_pca, metrics.get(1), 2)){
-                        System.out.println("Mismatch");
-
-                        System.exit(0);
-                    }
-                }
-            }
-        }
-
-    }
 
     public static void main(String[] args) throws IOException {
 
@@ -252,23 +245,25 @@ public class RuleQuery {
         String mat_file_name = args[2];
         String rule_file_name = args[3];
         double beta = Double.parseDouble(args[4]);
+        String path_to_config_folder = args[5];
 
         Properties prop = new Properties();
         InputStream input = null;
 
-        input = new FileInputStream("D:\\PhD\\Work\\UnderstandingLP\\Graph_JAVA\\Graph_JAVA\\src\\main\\java\\Graph_JAVA\\config.properties");
+        input = new FileInputStream(path_to_config_folder + "/config.properties");
         prop.load(input);
 
-        String materialization_file_path = prop.getProperty("materialization_file_path") + dataset_name + "\\" +  mat_file_name;
+        String materialization_file_path = prop.getProperty("materialization_file_path") + dataset_name + "/" +  mat_file_name;
         String database_folder_path = prop.getProperty("database_folder_path");
-        String rules_file_path = prop.getProperty("rules_file_path") + dataset_name + "\\" +  rule_file_name;
+        String rules_file_path = prop.getProperty("rules_file_path") + dataset_name + "/" +  rule_file_name;
         String dataset_folder_path = prop.getProperty("dataset_folder_path");
-        String output_file_path = prop.getProperty("output_file_path") + dataset_name + "\\" +  mat_file_name;
+        String output_file_path = prop.getProperty("output_file_path") + dataset_name + "/" +  mat_file_name;
+        String train_triples_path = dataset_folder_path + dataset_name + "/train2id.txt";
 
         RuleParser rp = new RuleParser(rules_file_path, dataset_folder_path, model_name, dataset_name, "\t");
         rp.parse_rules_from_file(beta);
 
-        HashMap<Integer, ArrayList> triple_dict = collect_materializations(materialization_file_path);
+        HashMap<Integer, ArrayList> triple_dict = collect_materializations(materialization_file_path, train_triples_path);
         FileWriter fileWriter = new FileWriter(output_file_path);
         BufferedWriter bufferedWriter = new BufferedWriter(fileWriter);
         int ctr = 0;
