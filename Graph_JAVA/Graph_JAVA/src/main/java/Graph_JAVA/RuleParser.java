@@ -35,7 +35,9 @@ public class RuleParser {
         this.rules_by_predicate = new HashMap<>();
         this.rules = new ArrayList<>();
         this.id_to_relationship = new HashMap<>();
-        this.create_id_to_relationship();
+
+        if (database_folder!=null)
+            this.create_id_to_relationship();
     }
 
     public void create_id_to_relationship() throws FileNotFoundException {
