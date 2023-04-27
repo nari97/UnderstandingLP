@@ -1,5 +1,8 @@
+import math
+import pickle
+import sys
+
 import networkx
-import subprocess
 from ExtractMetrics import extract_metrics
 from Score import Score
 
@@ -171,7 +174,7 @@ def compute_selectivity(head_coverage, pca_confidence, beta=1.0):
     return selectivity
 
 
-def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, beta=1.0):
+def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, triples_in_test, beta=1.0):
     """
         Compute the aggregate difference between the metrics for the base rule and the metrics for the mispredictions
 
@@ -184,7 +187,6 @@ def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, beta=1.0):
     """
 
     score_by_key = {}
-    rule_matches = []
     match_by_key = {}
 
     for key in base_rule_bucket:
@@ -194,11 +196,14 @@ def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, beta=1.0):
         score_by_key[key] = []
 
     for key in base_rule_bucket:
-        print("\nKey: ", key)
-        print("\n============================")
+
+        if len(base_rule_bucket[key]) == 0:
+            score = Score(-2.0, -2.0, -2.0)
+            score_by_key[key].append(score)
+
         for rule in base_rule_bucket[key]:
             my_rule = networkx_to_rule_mapping[rule]
-            print(my_rule.id_print())
+            relation = my_rule.head_atom.relationship
             hc_base = my_rule.head_coverage
             hc_predictions = my_rule.new_head_coverage
             pca_base = my_rule.pca_confidence
@@ -215,13 +220,18 @@ def aggregate_score(base_rule_bucket, networkx_to_rule_mapping, beta=1.0):
 
     aggregator_dict = {}
 
+    total_triples_in_test = 0
+
+    for key in triples_in_test:
+        total_triples_in_test += triples_in_test[key]
+
     for key in base_rule_bucket:
         agg_score = Score(0.0, 0.0, 0.0)
 
         for score_object in score_by_key[key]:
-            agg_score.add(score_object.hc, score_object.pca, score_object.selec)
+            agg_score.add(abs(score_object.hc), abs(score_object.pca), abs(score_object.selec))
 
-        agg_score.divide(len(score_by_key[key]), len(score_by_key[key]), len(score_by_key[key]))
+        #agg_score.divide(total_triples_in_test, total_triples_in_test, total_triples_in_test)
         aggregator_dict[key] = agg_score
 
     return aggregator_dict
@@ -254,54 +264,189 @@ def create_bucket_by_head(bucket, networkx_to_rule_mapping):
     return head_buckets
 
 
-def write_aggregated_score(folder_to_write, agg_score, bucket, networkx_to_rule_mapping, results_file_name,
-                           relations=None):
+def write_aggregated_score(model_name, dataset_name, folder_to_results, agg_score, bucket, networkx_to_rule_mapping, k,
+                           additional, relations=None):
     """
-    Write the aggregated scores of a given set of relations to a file.
+    Write the aggregated scores of a given set of rules to a file.
 
     Args:
-    - folder_to_write (str): The path of the folder where the results file will be written.
-    - agg_score (dict): A dictionary mapping relation type to aggregated scores.
-    - bucket (dict): A dictionary mapping relation type to a tuple of networkx node and rule id.
-    - networkx_to_rule_mapping (dict): A dictionary mapping networkx node to the corresponding rule object.
-    - results_file_name (str): The name of the results file to be written.
-    - relations (List[str], optional): A list of relation types to be written. Defaults to None.
+        model_name (str): The name of the model.
+        dataset_name (str): The name of the dataset.
+        folder_to_results (str): The path of the folder where the results file will be written.
+        agg_score (dict): A dictionary mapping relation type to aggregated scores.
+        bucket (dict): A dictionary mapping relation type to a tuple of networkx node and rule id.
+        networkx_to_rule_mapping (dict): A dictionary mapping networkx node to the corresponding rule object.
+        k (int): The number of candidate rules per relation type.
+        additional (str): Additional information to include in the results file name.
+        relations (List[str], optional): A list of relation types to be written. Defaults to None.
+
+    Returns:
+        None
     """
 
-    results_file_name = f"{folder_to_write}\\{results_file_name}"
+    results_file_name = f"{folder_to_results}/{dataset_name}/{model_name}/{dataset_name}_{model_name}_k_{k}_aggregated_{additional}.csv"
     keys = bucket.keys() if relations is None else relations
 
     with open(results_file_name, "w+") as file_obj:
         file_obj.write("Type,Rule,HC,PCA,Selec\n")
         for key in keys:
-
             if key not in bucket:
                 hc, pca, selec = Score(-2.0, -2.0, -2.0).get()
+                file_obj.write(f"{key},NULL,{hc},{pca},{selec}\n")
             else:
                 rule = networkx_to_rule_mapping[bucket[key][0]]
                 hc, pca, selec = agg_score[key].get()
-            file_obj.write(f"{key},{rule.id_print()},{hc},{pca},{selec}\n")
+
+                file_obj.write(f"{key},{rule.id_print()},{hc},{pca},{selec}\n")
 
 
-def compile_results_single(model_name, dataset_name, results_file_name, processed_file_name,
-                           folder_to_write, folder_to_processed_rules, beta=1.0, relations=None):
+def get_relation_list(folder_to_dataset, dataset_name):
+    f = open(f"{folder_to_dataset}/{dataset_name}/relation2id.txt")
+    n_relations = int(f.readline())
+
+    relations = [i for i in range(0, n_relations)]
+
+    f.close()
+    return relations
+
+
+def get_rules_with_unique_atoms(base_graphs, networkx_to_rule_mapping):
     """
-    Compile and aggregate the results for a single model-dataset combination.
+    Find rules with unique atoms in a list of base graphs.
 
     Args:
-    - model_name (str): The name of the model.
-    - dataset_name (str): The name of the dataset.
-    - results_file_name (str): The name of the results file to be written.
-    - processed_file_name (str): The name of the processed rules file.
-    - folder_to_write (str): The path of the folder where the results file will be written.
-    - folder_to_processed_rules (str): The path of the folder where the processed rules are stored.
-    - beta (float, optional): A weight parameter used in score aggregation. Defaults to 1.0.
-    - relations (int, optional): The number of relation types to be written. Defaults to None.
+        base_graphs (List[networkx.Graph]): A list of base graphs.
+        networkx_to_rule_mapping (Dict[networkx.Graph, Rule]): A dictionary mapping a base graph to its corresponding rule object.
+
+    Returns:
+        Tuple[List[networkx.Graph], List[networkx.Graph]]: A tuple of two lists containing base graphs:
+            - The first list contains base graphs whose corresponding rules have unique atoms.
+            - The second list contains base graphs whose corresponding rules do not have unique atoms.
+
     """
 
+    graphs_with_unique_atoms = []
+    graphs_without_unique_atoms = []
+
+    for graph in base_graphs:
+        relation_set = set()
+        flag = True
+        rule = networkx_to_rule_mapping[graph]
+        atoms = rule.body_atoms.copy()
+        atoms.append(rule.head_atom)
+        for atom in atoms:
+            relationship = atom.relationship
+
+            if relationship not in relation_set:
+                relation_set.add(relationship)
+            else:
+                flag = False
+                break
+
+        if len(relation_set) == len(rule.body_atoms) + 1:
+            flag = True
+
+        if flag:
+            graphs_with_unique_atoms.append(graph)
+        else:
+            graphs_without_unique_atoms.append(graph)
+
+    return graphs_with_unique_atoms, graphs_without_unique_atoms
+
+
+def get_types_of_rules(base_graphs, networkx_mapping):
+    symmetry = []
+    hierarchy = []
+    inversion = []
+    intersection = []
+
+    composition_path = []
+    composition_non_path = []
+
+    for graph in base_graphs:
+        rule = networkx_mapping[graph]
+
+        if len(rule.body_atoms) == 1:
+            if rule.body_atoms[0].relationship == rule.head_atom.relationship:
+                atom1 = rule.body_atoms[0]
+                atom2 = rule.head_atom
+
+                if atom1.variable1 == atom2.variable2 and atom1.variable2 == atom2.variable1:
+                    symmetry.append(graph)
+            else:
+                atom1 = rule.body_atoms[0]
+                atom2 = rule.head_atom
+
+                if atom1.variable1 == atom2.variable2 and atom1.variable2 == atom2.variable1:
+                    inversion.append(graph)
+                else:
+                    hierarchy.append(graph)
+
+        else:
+            atom1, atom2 = rule.body_atoms
+            atom3 = rule.head_atom
+
+            if atom1.relationship != atom2.relationship != atom3.relationship:
+                if atom1.variable1 == atom2.variable1 == atom3.variable1 and atom1.variable2 == atom2.variable2 == atom3.variable2:
+                    intersection.append(graph)
+                else:
+                    if atom1.variable2 == atom2.variable1:
+                        composition_path.append(graph)
+                    else:
+                        composition_non_path.append(graph)
+
+    # if len(symmetry) > 0:
+    #     print(f"Symmetry present, example: {symmetry[0].id_print()}")
+    #
+    # if len(inversion) > 0:
+    #     print(f"Inversion present, example: {inversion[0].id_print()}")
+    #
+    # if len(hierarchy) > 0:
+    #     print(f"Hierarchy present, example: {hierarchy[0].id_print()}")
+    #
+    # if len(composition) > 0:
+    #     print(f"Composition present, example: {composition[0].id_print()}")
+    #
+    # if len(intersection) > 0:
+    #     print(f"Intersection present, example: {intersection[0].id_print()}")
+
+    return {"Symmetry": symmetry, "Inversion": inversion, "Hierarchy": hierarchy, "Composition_Path": composition_path,
+            "Composition_Non_Path": composition_non_path, "Intersection": intersection}
+
+
+def filter_rules_by_head_in_test(rules, folder_to_datasets, dataset_name):
+    heads_in_test = []
+
+    with open(f"{folder_to_datasets}/{dataset_name}/test2id.txt") as f:
+        f.readline()
+
+        for line in f:
+            line = line.strip()
+
+            splits = line.split("\t")
+
+            if len(splits) < 2:
+                splits = line.split(" ")
+
+            relation = int(splits[2])
+
+            if relation not in heads_in_test:
+                heads_in_test.append(relation)
+
+    filtered_rules = []
+    for rule in rules:
+        if rule.head_atom.relationship in heads_in_test:
+            filtered_rules.append(rule)
+
+    return filtered_rules
+
+
+def compile_results_single(model_name, dataset_name, folder_to_results, folder_to_processed_rules, folder_to_datasets,
+                           k, beta=1.0):
     global universal_node_ids
 
-    processed_rules_path = f"{folder_to_processed_rules}{dataset_name}\\{processed_file_name}"
+    relations = get_relation_list(folder_to_datasets, dataset_name)
+    processed_rules_path = f"{folder_to_processed_rules}/{dataset_name}/{model_name}/{dataset_name}_{model_name}_k_{k}_processed.tsv"
 
     rules = extract_metrics(processed_rules_path)
 
@@ -309,52 +454,190 @@ def compile_results_single(model_name, dataset_name, results_file_name, processe
     base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules)
     networkx_to_rule_mapping = {**base_nwx_mapping}
 
-    base_bucket_type = create_bucket_by_type(base_graphs)
-
-    agg_score_by_type= aggregate_score(base_rule_bucket=base_bucket_type,
-                                                            networkx_to_rule_mapping=networkx_to_rule_mapping,
-                                                            beta=beta)
-    write_aggregated_score(folder_to_write=folder_to_write, agg_score=agg_score_by_type, bucket=base_bucket_type,
-                           networkx_to_rule_mapping=networkx_to_rule_mapping, results_file_name=results_file_name)
-
+    # base_bucket_type = create_bucket_by_type(base_graphs)
+    #
+    # agg_score_by_type = aggregate_score(base_rule_bucket=base_bucket_type,
+    #                                     networkx_to_rule_mapping=networkx_to_rule_mapping,
+    #                                     beta=beta)
+    #
+    # write_aggregated_score(folder_to_results=folder_to_results, agg_score=agg_score_by_type, bucket=base_bucket_type,
+    #                        networkx_to_rule_mapping=networkx_to_rule_mapping, model_name=model_name,
+    #                        dataset_name=dataset_name, k=k
+    #                        , additional="type")
+    #
     # base_bucket_head = create_bucket_by_head(bucket=base_bucket_type, networkx_to_rule_mapping=networkx_to_rule_mapping)
-    # augment_bucket_head = create_bucket_by_head(bucket=augment_bucket_type,
-    #                                             networkx_to_rule_mapping=networkx_to_rule_mapping)
-    # agg_score_by_head, rule_match_by_head = aggregate_score(base_rule_bucket=base_bucket_head,
-    #                                                         augment_rule_bucket=augment_bucket_head,
-    #                                                         networkx_to_rule_mapping=networkx_to_rule_mapping)
-    # write_aggregated_score(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-    #                        folder_to_write=folder_to_write, agg_score=agg_score_by_head, bucket=base_bucket_head,
-    #                        networkx_to_rule_mapping=networkx_to_rule_mapping, additional=additional,
-    #                        relations=relations)
-    # write_rule_matches(dataset_name=dataset_name, model_name=model_name, mat_type=mat_type,
-    #                    folder_to_write=folder_to_write, rule_matches=rule_match_by_head, additional=additional)
+    #
+    # agg_score_by_head = aggregate_score(base_rule_bucket=base_bucket_head,
+    #                                     networkx_to_rule_mapping=networkx_to_rule_mapping,
+    #                                     beta=beta)
+    #
+    # write_aggregated_score(dataset_name=dataset_name, model_name=model_name,
+    #                        folder_to_results=folder_to_results, agg_score=agg_score_by_head, bucket=base_bucket_head,
+    #                        networkx_to_rule_mapping=networkx_to_rule_mapping,
+    #                        relations=relations, k=k, additional="head")
+
+    graphs_with_unique_atoms, graphs_with_repeating_atoms = get_rules_with_unique_atoms(base_graphs,
+                                                                                        networkx_to_rule_mapping)
+
+    unique_bucket_by_type = create_bucket_by_type(graphs_with_unique_atoms)
+    repeating_bucket_by_type = create_bucket_by_type(graphs_with_repeating_atoms)
+    unique_bucket_by_head = create_bucket_by_head(unique_bucket_by_type, networkx_to_rule_mapping)
+    repeating_bucket_by_head = create_bucket_by_head(repeating_bucket_by_type, networkx_to_rule_mapping)
+
+    agg_scores_unique_type = aggregate_score(base_rule_bucket=unique_bucket_by_type,
+                                             networkx_to_rule_mapping=networkx_to_rule_mapping, beta=1)
+    agg_scores_repeating_type = aggregate_score(base_rule_bucket=repeating_bucket_by_type,
+                                                networkx_to_rule_mapping=networkx_to_rule_mapping, beta=1)
+    agg_scores_unique_head = aggregate_score(base_rule_bucket=unique_bucket_by_head,
+                                             networkx_to_rule_mapping=networkx_to_rule_mapping, beta=1)
+    agg_scores_repeating_head = aggregate_score(base_rule_bucket=repeating_bucket_by_head,
+                                                networkx_to_rule_mapping=networkx_to_rule_mapping, beta=1)
+
+    write_aggregated_score(dataset_name=dataset_name, model_name=model_name,
+                           folder_to_results=folder_to_results, agg_score=agg_scores_unique_type,
+                           bucket=unique_bucket_by_type,
+                           networkx_to_rule_mapping=networkx_to_rule_mapping,
+                           k=k, additional="unique_type")
+
+    write_aggregated_score(dataset_name=dataset_name, model_name=model_name,
+                           folder_to_results=folder_to_results, agg_score=agg_scores_repeating_type,
+                           bucket=repeating_bucket_by_type,
+                           networkx_to_rule_mapping=networkx_to_rule_mapping,
+                           k=k, additional="repeating_type")
+
+    write_aggregated_score(dataset_name=dataset_name, model_name=model_name,
+                           folder_to_results=folder_to_results, agg_score=agg_scores_unique_head,
+                           bucket=unique_bucket_by_head,
+                           networkx_to_rule_mapping=networkx_to_rule_mapping,
+                           relations=relations, k=k, additional="unique_head")
+
+    write_aggregated_score(dataset_name=dataset_name, model_name=model_name,
+                           folder_to_results=folder_to_results, agg_score=agg_scores_repeating_head,
+                           bucket=repeating_bucket_by_head,
+                           networkx_to_rule_mapping=networkx_to_rule_mapping,
+                           relations=relations, k=k, additional="repeating_head")
 
 
-def process_rules(model_name, dataset_name, mat_file_name, rules_file_name, processed_rule_folder_path):
-    java_class_path = r"D:\PhD\Work\UnderstandingLP\Graph_JAVA\Graph_JAVA\build\install\Graph_JAVA\bin\Graph_JAVA.bat"
+def get_correct_predictions(dataset_name, model_name, folder_to_datasets, folder_to_materializations):
+    triple_dict = pickle.load(
+        open(f"{folder_to_materializations}/{dataset_name}/{model_name}/{dataset_name}_{model_name}_top_100.pickle",
+             "rb"))
 
-    print("Starting post processing of rules")
-    process = subprocess.Popen([java_class_path, dataset_name, model_name, mat_file_name, rules_file_name, "1.0"],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    print("the commandline is {}".format(process.args))
-    print(stdout.decode())
-    print(stderr.decode())
-    print("Finished processing of rules")
+    triples_in_mat = []
+    for key, value in triple_dict.items():
+        # print(key, value)
+        if value <= k:
+            triples_in_mat.append((int(key[0]), int(key[1]), int(key[2])))
 
-    processed_rule_file_name = f"{processed_rule_folder_path}\\{dataset_name}\\{mat_file_name}"
-    rules = extract_metrics(processed_rule_file_name)
+    triples_in_test = []
 
-    return rules
+    with open(f"{folder_to_datasets}/{dataset_name}/test2id.txt") as f:
+        f.readline()
+
+        for line in f:
+            line = line.strip()
+
+            splits = line.split("\t")
+
+            if len(splits) < 2:
+                splits = line.split(" ")
+
+            triples_in_test.append((int(splits[0]), int(splits[2]), int(splits[1])))
+
+    # print(triples_in_test)
+    # print("----")
+    # print(triples_in_mat)
+    # print("----")
+    ctr = 0
+    for triple in triples_in_test:
+        if triple in triples_in_mat:
+            ctr += 1
+
+    print(
+        f"Dataset: {dataset_name}, Model: {model_name}, Number of predictions: {len(triples_in_test)}, Accurate prediction percentage: {ctr * 1.0 / len(triples_in_test)}, Number of test triples missing: {len(triples_in_test)-ctr}")
+
+
+def get_triples_in_test_by_relation(folder_to_datasets, dataset_name):
+
+    triples_in_test = {}
+    with open(f"{folder_to_datasets}/{dataset_name}/test2id.txt") as f:
+        f.readline()
+
+        for line in f:
+            line = line.strip()
+
+            splits = line.split("\t")
+
+            if len(splits) < 2:
+                splits = line.split(" ")
+
+            if int(splits[2]) not in triples_in_test:
+                triples_in_test[int(splits[2])] = []
+
+            triples_in_test[int(splits[2])].append((int(splits[0]), int(splits[2]), int(splits[1])))
+
+    triples = {}
+
+    for key in triples_in_test:
+        triples[key] = len(triples_in_test[key])
+    return triples
+
+def compile_results_with_specified_types(model_name, dataset_name, folder_to_results, folder_to_processed_rules,
+                                         folder_to_datasets, folder_to_materializations,
+                                         k, beta=1.0):
+    global universal_node_ids
+
+    relations = get_relation_list(folder_to_datasets, dataset_name)
+    processed_rules_path = f"{folder_to_processed_rules}/{dataset_name}/{model_name}/{dataset_name}_{model_name}_k_{k}_processed.tsv"
+
+    triples_in_test = get_triples_in_test_by_relation(folder_to_datasets, dataset_name)
+    get_correct_predictions(dataset_name, model_name, folder_to_datasets, folder_to_materializations)
+    all_rules = extract_metrics(processed_rules_path)
+
+    rules = filter_rules_by_head_in_test(all_rules, folder_to_datasets, dataset_name)
+
+    universal_node_ids = get_universal_node_id_mapping([rules])
+    base_graphs, base_nwx_mapping = convert_rules_to_networkx_graphs(rules)
+    networkx_to_rule_mapping = {**base_nwx_mapping}
+
+    buckets_by_specified_types = get_types_of_rules(base_graphs, networkx_to_rule_mapping)
+
+    agg_score = aggregate_score(buckets_by_specified_types, networkx_to_rule_mapping, triples_in_test, beta)
+
+    for key in agg_score:
+        print(
+            f"{key}: HC: {round(agg_score[key].hc, 3)}, PCA: {round(agg_score[key].pca, 3)}, Selectivity: {round(agg_score[key].selec, 3)}")
 
 
 if __name__ == "__main__":
-    model_name = "TransE"
+    # model_name = sys.argv[1]
+    # dataset_name = sys.argv[2]
+    # folder_to_write = sys.argv[3]
+    # folder_to_processed_rules = sys.argv[4]
+    # folder_to_datasets = sys.argv[5]
+    # k = int(sys.argv[6])
+
+    model_name = "tucker"
     dataset_name = "WN18"
-    results_file_name = "WN18_TransE_type_aggregated.tsv"
-    processed_file_name = "TransE_materialized.tsv"
-    folder_to_write = f"D:\\PhD\\Work\\UnderstandingLP\\data\\Results\\{dataset_name}\\{model_name}"
-    folder_to_processed_rules = f"D:\\PhD\\Work\\UnderstandingLP\\data\\ProcessedRules\\"
-    compile_results_single(model_name, dataset_name, results_file_name, processed_file_name, folder_to_write,
-                           folder_to_processed_rules)
+    folder_to_write = "D:/PhD/Work/UnderstandingLP/data/AggregatedRules"
+    folder_to_processed_rules = "D:/PhD/Work/UnderstandingLP/data/ProcessedRules"
+    folder_to_datasets = "D:/PhD/Work/UnderstandingLP/data/Datasets"
+    folder_to_materializations = "D:/PhD/Work/UnderstandingLP/data/Materializations"
+    k = 1
+
+    models = ["boxe", "complex", "hake", "hole", "quate", "rotate", "rotpro", "toruse", "transe", "tucker"]
+    datasets = ["WN18"]
+
+    for dataset_name in datasets:
+        for model_name in models:
+            print(f"\nDataset: {dataset_name}, Model: {model_name}")
+            # compile_results_single(model_name=model_name, dataset_name=dataset_name, folder_to_results=folder_to_write,
+            #                        folder_to_processed_rules=folder_to_processed_rules, k=k,
+            #                        folder_to_datasets=folder_to_datasets)
+            compile_results_with_specified_types(model_name=model_name, dataset_name=dataset_name,
+                                                 folder_to_results=folder_to_write,
+                                                 folder_to_processed_rules=folder_to_processed_rules, k=k,
+                                                 folder_to_datasets=folder_to_datasets, folder_to_materializations=folder_to_materializations)
+
+            print(
+                "=====================================================================================================")
