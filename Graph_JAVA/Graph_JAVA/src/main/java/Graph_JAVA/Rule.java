@@ -1,4 +1,4 @@
-package Graph_JAVA;
+package RuleExampleCreator;
 import java.util.List;
 
 public class Rule {

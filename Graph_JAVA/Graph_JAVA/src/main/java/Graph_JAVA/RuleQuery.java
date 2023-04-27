@@ -1,6 +1,7 @@
 package Graph_JAVA;
 import com.google.common.io.MoreFiles;
 import com.google.common.io.RecursiveDeleteOption;
+import org.apache.shiro.crypto.hash.Hash;
 import org.neo4j.batchinsert.BatchInserter;
 import org.neo4j.batchinsert.BatchInserters;
 import org.neo4j.configuration.Config;
@@ -11,6 +12,7 @@ import org.neo4j.graphdb.*;
 import org.neo4j.io.layout.DatabaseLayout;
 
 import java.io.*;
+import java.lang.reflect.Array;
 import java.util.*;
 import java.util.stream.IntStream;
 
@@ -46,14 +48,19 @@ public class RuleQuery {
         inserter.shutdown();
     }
 
-    public static long get_pca_denominator(Transaction tx, Rule r){
+    public static long get_number_of_entities(String path_to_neo4j_database){
+        File neo4j_folder = new File(path_to_neo4j_database);
+        DatabaseManagementService service = new DatabaseManagementServiceBuilder(neo4j_folder.toPath()).
+                setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
+                setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).
+                setConfig(GraphDatabaseSettings.pagecache_memory, "64G").
+                setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
+                setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).build();
 
-        String fv = r.functional_variable;
-        String nfv = r.functional_variable.equals("a")?"b":"a";
-        String relation = r.body_atoms.get(0).relationship;
-        HashMap<Long, Long> hm = new HashMap<>();
-        long n_entities = 0;
+        GraphDatabaseService db = service.database("neo4j");
+        Transaction tx = db.beginTx();
         String query = "MATCH (a) RETURN count(a) as cnt";
+        long n_entities = 0;
         try{
             Result res = tx.execute(query);
             while(res.hasNext()){
@@ -63,26 +70,14 @@ public class RuleQuery {
         } catch (Exception e){
             e.printStackTrace();
         }
+        service.shutdown();
+        return n_entities;
+    }
 
-        if (fv.equals("b"))
-            query = "MATCH (b) RETURN id(b) as var, size(()-[:`" + relation +"`]->(b)) as cnt";
-        else
-            query = "MATCH (a) RETURN id(a) as var, size((a)-[:`" + relation +"`]->()) as cnt";
+    public static long get_pca_denominator(Transaction tx, Rule r, HashMap<Long, ArrayList<Long>> node_degree_dict, long n_entities){
 
-        try{
-            Result res = tx.execute(query);
-
-            while(res.hasNext()){
-                Map<String, Object> row = res.next();
-                long var = (long) row.get("var");
-                long count = (long) row.get("cnt");
-                hm.put(var, count);
-            }
-            res.close();
-        } catch (Exception e){
-            e.printStackTrace();
-        }
-        query = "MATCH " + r.body_atoms.get(0).neo4j_print() + " RETURN id(a) as a, id(b) as b";
+        String fv = r.functional_variable;
+        String query = "MATCH " + r.body_atoms.get(0).neo4j_print() + " RETURN id(a) as a, id(b) as b";
         long pca_denom = 0;
         try{
             Result res = tx.execute(query);
@@ -91,9 +86,19 @@ public class RuleQuery {
                 Map<String, Object> row = res.next();
 
                 long functionalVar = (long) row.get(fv);
-                if (hm.containsKey(functionalVar) && (n_entities - hm.get(functionalVar) > 0)){
-                    ++pca_denom;
+                if (node_degree_dict.containsKey(functionalVar)){
+                    if (fv.equals("b")){
+                        if (n_entities - node_degree_dict.get(functionalVar).get(1) > 0)
+                            ++pca_denom;
+                    }
+                    else{
+                        if (n_entities - node_degree_dict.get(functionalVar).get(0) > 0) {
+                            ++pca_denom;
+                        }
+                    }
+
                 }
+
             }
         } catch (Exception e){
             e.printStackTrace();
@@ -102,7 +107,45 @@ public class RuleQuery {
         return pca_denom;
     }
 
-    public static ArrayList<Double> query_rule_asymmetry(Rule rule_to_query, String database_folder_path){
+    public static HashMap<Long, ArrayList<Long>> get_node_degrees(String path_to_neo4j_database){
+
+        String query = "MATCH (z) RETURN id(z) as var, size(()-[]->(z)) as inDegree, size((z)-[]->()) as outDegree";
+        HashMap<Long, ArrayList<Long>> node_degree_dict = new HashMap<>();
+        File neo4j_folder = new File(path_to_neo4j_database);
+        DatabaseManagementService service = new DatabaseManagementServiceBuilder(neo4j_folder.toPath()).
+                setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
+                setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).
+                setConfig(GraphDatabaseSettings.pagecache_memory, "64G").
+                setConfig(GraphDatabaseSettings.keep_logical_logs, "false").
+                setConfig(GraphDatabaseSettings.preallocate_logical_logs, false).build();
+
+        GraphDatabaseService db = service.database("neo4j");
+        Transaction tx = db.beginTx();
+
+        try{
+            Result res = tx.execute(query);
+
+            while(res.hasNext()){
+                Map<String, Object> row = res.next();
+                long var = (long) row.get("var");
+                long inDegree = (long) row.get("inDegree");
+                long outDegree = (long) row.get("outDegree");
+
+                ArrayList<Long> degrees = new ArrayList<>();
+                degrees.add(outDegree);
+                degrees.add(inDegree);
+                node_degree_dict.put(var, degrees);
+            }
+            res.close();
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+        service.shutdown();
+
+        return node_degree_dict;
+    }
+
+    public static ArrayList<Double> query_rule_asymmetry(Rule rule_to_query, String database_folder_path, HashMap<Long, ArrayList<Long>> node_degree_dict, long n_entities){
 
         File neo4j_folder = new File(database_folder_path);
         DatabaseManagementService service = new DatabaseManagementServiceBuilder(neo4j_folder.toPath()).
@@ -139,14 +182,14 @@ public class RuleQuery {
             e.printStackTrace();
         }
 
-        long pca = get_pca_denominator(tx, rule_to_query);
+        long pca = get_pca_denominator(tx, rule_to_query, node_degree_dict, n_entities);
 
-        System.out.println("Computed support: " + support);
-        System.out.println("Computed tHeads: " + heads);
-        System.out.println("Computed PCA: " + pca);
+        System.out.println("\tComputed support: " + support);
+        System.out.println("\tComputed tHeads: " + heads);
+        System.out.println("\tComputed PCA: " + pca);
 
-        System.out.println("Head coverage: " + (support * 1.0 / heads));
-        System.out.println("PCA confidence: " + (support * 1.0 / pca));
+        System.out.println("\tHead coverage: " + (support * 1.0 / heads));
+        System.out.println("\tPCA confidence: " + (support * 1.0 / pca));
 
         double hc_for_rule = (1.0*support)/heads;
         double pca_for_rule = (1.0*support)/pca;
@@ -250,10 +293,10 @@ public class RuleQuery {
                 for (Long other : bodyPairs.get(fv))
                     pca.add(fv + "," + other);
 
-        System.out.println("Body pairs size: " + bodyPairs.size());
-        System.out.println("Head size: " + totalHeads);
-        System.out.println("Support size: " + support.size());
-        System.out.println("PCA size: " + pca.size());
+        System.out.println("\tBody pairs size: " + bodyPairs.size());
+        System.out.println("\tHead size: " + totalHeads);
+        System.out.println("\tSupport size: " + support.size());
+        System.out.println("\tPCA size: " + pca.size());
 
         // make pca and hc
         double hc_for_rule = (1.0*support.size())/totalHeads;
@@ -268,12 +311,14 @@ public class RuleQuery {
         return metrics;
     }
 
-    public static HashMap<Integer, ArrayList> collect_materializations(String materialization_folder_path, String train_triples_path) throws FileNotFoundException {
+    public static HashMap<Integer, ArrayList<ArrayList<Integer>>> collect_materializations(String materialization_folder_path, String train_triples_path, String valid_triples_path, String test_triples_path) throws FileNotFoundException {
 
-        HashMap<Integer, ArrayList> triple_dict = new HashMap<>();
+        HashMap<Integer, ArrayList<ArrayList<Integer>>> triple_dict = new HashMap<>();
         Scanner sc = null;
         int materialization_count = 0;
         int train_count = 0;
+        int valid_count = 0;
+        int test_count = 0 ;
 
         if (materialization_folder_path!=null) {
             sc = new Scanner(new File(materialization_folder_path));
@@ -290,7 +335,7 @@ public class RuleQuery {
                 int o = Integer.parseInt(splits[2]);
 
                 if (!triple_dict.containsKey(p)) {
-                    ArrayList<ArrayList<Integer>> temp = new ArrayList();
+                    ArrayList<ArrayList<Integer>> temp = new ArrayList<>();
                     triple_dict.put(p, temp);
                 }
 
@@ -322,7 +367,7 @@ public class RuleQuery {
                 int p = Integer.parseInt(splits[2]);
 
                 if (!triple_dict.containsKey(p)) {
-                    ArrayList<ArrayList<Integer>> temp = new ArrayList();
+                    ArrayList<ArrayList<Integer>> temp = new ArrayList<>();
                     triple_dict.put(p, temp);
                 }
 
@@ -334,11 +379,71 @@ public class RuleQuery {
             }
         }
 
-        System.out.println("Materialization count: " + materialization_count + ", Train count: " + train_count);
+        if(test_triples_path!=null) {
+            sc = new Scanner(new File(test_triples_path));
+            sc.nextLine();
+            while (sc.hasNext()) {
+
+                String line = sc.nextLine();
+                if (line.equals("\n") || line.equals(""))
+                    continue;
+                test_count++;
+                String[] splits = line.strip().split("\t");
+                if (splits.length == 1) {
+                    splits = line.strip().split(" ");
+                }
+                int s = Integer.parseInt(splits[0]);
+                int o = Integer.parseInt(splits[1]);
+                int p = Integer.parseInt(splits[2]);
+
+                if (!triple_dict.containsKey(p)) {
+                    ArrayList<ArrayList<Integer>> temp = new ArrayList<>();
+                    triple_dict.put(p, temp);
+                }
+
+                ArrayList<Integer> triple = new ArrayList<>();
+                triple.add(s);
+                triple.add(p);
+                triple.add(o);
+                triple_dict.get(p).add(triple);
+            }
+        }
+
+        if(valid_triples_path!=null) {
+            sc = new Scanner(new File(valid_triples_path));
+            sc.nextLine();
+            while (sc.hasNext()) {
+
+                String line = sc.nextLine();
+                if (line.equals("\n") || line.equals(""))
+                    continue;
+                valid_count++;
+                String[] splits = line.strip().split("\t");
+                if (splits.length == 1) {
+                    splits = line.strip().split(" ");
+                }
+                int s = Integer.parseInt(splits[0]);
+                int o = Integer.parseInt(splits[1]);
+                int p = Integer.parseInt(splits[2]);
+
+                if (!triple_dict.containsKey(p)) {
+                    ArrayList<ArrayList<Integer>> temp = new ArrayList<>();
+                    triple_dict.put(p, temp);
+                }
+
+                ArrayList<Integer> triple = new ArrayList<>();
+                triple.add(s);
+                triple.add(p);
+                triple.add(o);
+                triple_dict.get(p).add(triple);
+            }
+        }
+
+        System.out.println("Materialization count: " + materialization_count + ", Train count: " + train_count + ", Valid count: " + valid_count + "" + ", Test count: " + test_count);
         return triple_dict;
     }
 
-    public static ArrayList collect_materializations_for_rule(Rule rule, HashMap<Integer, ArrayList> triple_dict){
+    public static ArrayList<ArrayList<Integer>> collect_materializations_for_rule(Rule rule, HashMap<Integer, ArrayList<ArrayList<Integer>>> triple_dict){
         Set<ArrayList<Integer>> triples = new HashSet<>();
 
         for(Atom atom: rule.body_atoms){
@@ -352,7 +457,7 @@ public class RuleQuery {
 //        System.out.println(triple_dict.get(relationship).size());
         triples.addAll(triple_dict.get(relationship));
 
-        return new ArrayList(triples);
+        return new ArrayList<>(triples);
     }
 
 
@@ -365,20 +470,21 @@ public class RuleQuery {
         String rule_file_name = args[3];
         double beta = Double.parseDouble(args[4]);
         String path_to_materialization_folder = args[5];
-        String path_to_neo4j_database_folder = args[6] + "/db/";
+        String path_to_neo4j_database_folder = args[6] + "_" + mat_file_name.replace(".tsv", "") + "/db/";
         String path_to_processed_folder = args[7];
         String path_to_dataset_folder = args[8];
-
+        System.out.println("Dataset name: " + dataset_name + "; Model name: " + model_name);
         String materialization_file_path = path_to_materialization_folder + "/" + dataset_name + "/" + model_name +"/" +  mat_file_name;
         String rules_file_path = path_to_dataset_folder + "/" + dataset_name + "/" +  rule_file_name;
-        String output_file_path = path_to_processed_folder + "/" + dataset_name + "/" + model_name + "/" +  mat_file_name;
+        String output_file_path = path_to_processed_folder + "/" + dataset_name + "/" + model_name + "/" +  mat_file_name.replace(".","_processed.");
         String train_triples_path = path_to_dataset_folder + "/" + dataset_name + "/train2id.txt";
-
+        String valid_triples_path = path_to_dataset_folder + "/" + dataset_name + "/valid2id.txt";
+        String test_triples_path = path_to_dataset_folder + "/" + dataset_name + "/test2id.txt";
         RuleParser rp = new RuleParser(rules_file_path, null, model_name, dataset_name, "\t");
         rp.parse_rules_from_file(beta);
 
-        HashMap<Integer, ArrayList> triple_dict = collect_materializations(materialization_file_path, train_triples_path);
-        HashMap<Integer, ArrayList> triple_dict_for_train = collect_materializations(null, train_triples_path);
+        HashMap<Integer, ArrayList<ArrayList<Integer>>> triple_dict = collect_materializations(materialization_file_path, train_triples_path, valid_triples_path, null);
+//        HashMap<Integer, ArrayList<ArrayList<Integer>>> triple_dict_for_dataset = collect_materializations(null, train_triples_path, valid_triples_path, test_triples_path);
         FileWriter fileWriter = new FileWriter(output_file_path);
         BufferedWriter bufferedWriter = new BufferedWriter(fileWriter);
         HashMap<String, String> fv_for_relation = new HashMap<>();
@@ -390,28 +496,41 @@ public class RuleQuery {
             }
         }
 
-        int relation_total = rp.rules_by_predicate.keySet().size();
-        int relation_count = 0;
-        for(String relation: rp.rules_by_predicate.keySet()){
-            ArrayList<Atom> body = new ArrayList<>();
-            body.add(new Atom(relation, "b", "a", ""));
-            Atom head = new Atom(relation, "a", "b", "");
-
-            Rule r = new Rule(head, body, 0.1, 0.1, fv_for_relation.get(relation), beta);
-            System.out.println("\nProcessing asymmetry rule on train " + relation_count + "/" + relation_total + ": NOT: " + r.id_print());
-            ArrayList<ArrayList<Integer>> triples_train = collect_materializations_for_rule(r, triple_dict_for_train);
-            create_neo4j_database(path_to_neo4j_database_folder, triples_train);
-            ArrayList<Double> og_metrics = query_rule_asymmetry(r, path_to_neo4j_database_folder);
-            r.head_coverage = og_metrics.get(0);
-            r.pca_confidence = og_metrics.get(1);
-
-            System.out.println("\nProcessing asymmetry rule on materialization+train" + relation_count + "/" + relation_total + ": NOT: " + r.id_print());
-            ArrayList<ArrayList<Integer>> triples = collect_materializations_for_rule(r, triple_dict);
-            create_neo4j_database(path_to_neo4j_database_folder, triples);
-            ArrayList<Double> metrics = query_rule_asymmetry(r, path_to_neo4j_database_folder);
-            bufferedWriter.write("NOT:" + r.id_print() + "\t" + r.head_coverage + "\t" + r.pca_confidence + "\t" + metrics.get(0) + "\t" + metrics.get(1) + "\n");
-            bufferedWriter.flush();
-        }
+//        int relation_total = rp.rules_by_predicate.keySet().size();
+//        int relation_count = 0;
+//        HashMap<Long, ArrayList<Long>> node_degrees_dict = null;
+//        long n_entities = 0;
+//        for(String relation: rp.rules_by_predicate.keySet()){
+//            ArrayList<Atom> body = new ArrayList<>();
+//            body.add(new Atom(relation, "b", "a", ""));
+//            Atom head = new Atom(relation, "a", "b", "");
+//
+//            Rule r = new Rule(head, body, 0.1, 0.1, fv_for_relation.get(relation), beta);
+//            System.out.println("\nProcessing asymmetry rule on train+test+valid " + relation_count + "/" + relation_total + ": NOT: " + r.id_print());
+//            System.out.println("\tCreating and initializing database");
+//            ArrayList<ArrayList<Integer>> triples_train = collect_materializations_for_rule(r, triple_dict_for_dataset);
+//            create_neo4j_database(path_to_neo4j_database_folder, triples_train);
+//            System.out.println("\tPre-computing number of nodes and node degrees");
+//            node_degrees_dict = get_node_degrees(path_to_neo4j_database_folder);
+//            n_entities = get_number_of_entities(path_to_neo4j_database_folder);
+//            System.out.println("\tComputing metrics");
+//            ArrayList<Double> og_metrics = query_rule_asymmetry(r, path_to_neo4j_database_folder, node_degrees_dict, n_entities);
+//            r.head_coverage = og_metrics.get(0);
+//            r.pca_confidence = og_metrics.get(1);
+//
+//            System.out.println("\nProcessing asymmetry rule on train+predictions " + relation_count + "/" + relation_total + ": NOT: " + r.id_print());
+//            System.out.println("\tCreating and initializing database");
+//            ArrayList<ArrayList<Integer>> triples = collect_materializations_for_rule(r, triple_dict);
+//            create_neo4j_database(path_to_neo4j_database_folder, triples);
+//            System.out.println("\tPre-computing number of nodes and node degrees");
+//            node_degrees_dict = get_node_degrees(path_to_neo4j_database_folder);
+//            n_entities = get_number_of_entities(path_to_neo4j_database_folder);
+//            System.out.println("\tComputing metrics");
+//            ArrayList<Double> metrics = query_rule_asymmetry(r, path_to_neo4j_database_folder, node_degrees_dict, n_entities);
+//            bufferedWriter.write("NOT:" + r.id_print() + "\t" + r.head_coverage + "\t" + r.pca_confidence + "\t" + metrics.get(0) + "\t" + metrics.get(1) + "\n");
+//            bufferedWriter.flush();
+//            relation_count++;
+//        }
 
         int ctr = 0;
         for(Rule this_rule: rp.rules){

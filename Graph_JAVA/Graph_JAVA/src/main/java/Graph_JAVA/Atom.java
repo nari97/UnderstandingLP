@@ -1,4 +1,4 @@
-package Graph_JAVA;
+package RuleExampleCreator;
 
 public class Atom {
 
